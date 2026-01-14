@@ -1,3 +1,5 @@
+ARG GITHUB_TOKEN
+ARG GITHUB_USER
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 WORKDIR /app
 EXPOSE 5003
@@ -5,8 +7,6 @@ EXPOSE 5003
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 COPY ["src/Loans.API/Loans.API.csproj", "Loans.API/"]
-ARG GITHUB_TOKEN
-ARG GITHUB_USER
 RUN dotnet nuget update source github --username ${GITHUB_USER} --password ${GITHUB_TOKEN}
 RUN dotnet restore "Loans.API/Loans.API.csproj"
 COPY src/Loans.API/. Loans.API/
