@@ -1,0 +1,93 @@
+name: 3. Verify Health Checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, staging, prod]
+
+env:
+  SERVICE_NAME: loans-service
+  OPENSHIFT_NAMESPACE: mortgage-app
+
+jobs:
+  verify-health:
+    name: Verify Health Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4.14"
+
+      - name: Login to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Get Service URL
+        id: get-url
+        run: |
+          ROUTE_URL=$(oc get route ${{ env.SERVICE_NAME }} -n ${{ env.OPENSHIFT_NAMESPACE }} -o jsonpath='{.spec.host}')
+          echo "service_url=https://${ROUTE_URL}" >> $GITHUB_OUTPUT
+
+      - name: Check Pod Status
+        run: |
+          echo "📊 Pod Status:"
+          oc get pods -l app=${{ env.SERVICE_NAME }} -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Verify Liveness
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.get-url.outputs.service_url }}/api/health/live" --max-time 30)
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Liveness check passed"
+          else
+            echo "❌ Liveness check failed: HTTP ${HTTP_CODE}"
+            exit 1
+          fi
+
+      - name: Verify Readiness (includes dependency checks)
+        run: |
+          echo "🔗 Checking readiness (includes dependency health)..."
+          RESPONSE=$(curl -s "${{ steps.get-url.outputs.service_url }}/api/health/ready" --max-time 30)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.get-url.outputs.service_url }}/api/health/ready" --max-time 30)
+          
+          echo "Response: $RESPONSE"
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Readiness check passed - all dependencies healthy"
+          elif [ "$HTTP_CODE" = "503" ]; then
+            echo "⚠️ Service degraded - some dependencies unhealthy"
+            echo "$RESPONSE" | jq .
+          else
+            echo "❌ Readiness check failed: HTTP ${HTTP_CODE}"
+            exit 1
+          fi
+
+      - name: Verify Main Health Endpoint
+        run: |
+          echo "🏥 Main health endpoint:"
+          curl -s "${{ steps.get-url.outputs.service_url }}/api/health" | jq .
+
+      - name: Check Dependency Status
+        run: |
+          echo "🔗 Dependency Status:"
+          RESPONSE=$(curl -s "${{ steps.get-url.outputs.service_url }}/api/health/ready")
+          echo "$RESPONSE" | jq '.Dependencies // empty'
+
+      - name: Summary
+        run: |
+          echo "## 🏥 Health Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: ${{ steps.get-url.outputs.service_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "### Dependencies" >> $GITHUB_STEP_SUMMARY
+          echo "- Customer Service" >> $GITHUB_STEP_SUMMARY
+          echo "- Property Service" >> $GITHUB_STEP_SUMMARY

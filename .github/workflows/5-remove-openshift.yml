@@ -1,0 +1,71 @@
+name: 5. Remove from OpenShift
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, staging, prod]
+      confirm_delete:
+        description: 'Type "loans-service" to confirm'
+        required: true
+
+env:
+  SERVICE_NAME: loans-service
+  OPENSHIFT_NAMESPACE: mortgage-app
+
+jobs:
+  remove:
+    name: Remove from OpenShift
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm_delete }}" != "${{ env.SERVICE_NAME }}" ]; then
+            echo "❌ Confirmation failed!"
+            exit 1
+          fi
+
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4.14"
+
+      - name: Login to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Check dependent services
+        run: |
+          echo "⚠️ Warning: The following services depend on ${{ env.SERVICE_NAME }}:"
+          echo "  - payments-service"
+          echo "  - application-service"
+          echo ""
+          echo "Removing this service may cause those services to fail health checks."
+
+      - name: Scale down and delete
+        run: |
+          oc scale deployment/${{ env.SERVICE_NAME }} --replicas=0 -n ${{ env.OPENSHIFT_NAMESPACE }} || true
+          sleep 5
+          oc delete route ${{ env.SERVICE_NAME }} -n ${{ env.OPENSHIFT_NAMESPACE }} --ignore-not-found
+          oc delete service ${{ env.SERVICE_NAME }} -n ${{ env.OPENSHIFT_NAMESPACE }} --ignore-not-found
+          oc delete deployment ${{ env.SERVICE_NAME }} -n ${{ env.OPENSHIFT_NAMESPACE }} --ignore-not-found
+          oc delete configmap ${{ env.SERVICE_NAME }}-config -n ${{ env.OPENSHIFT_NAMESPACE }} --ignore-not-found
+
+      - name: Verify deletion
+        run: |
+          echo "🔍 Verifying deletion..."
+          oc get all -l app=${{ env.SERVICE_NAME }} -n ${{ env.OPENSHIFT_NAMESPACE }} || echo "✅ All resources removed"
+
+      - name: Summary
+        run: |
+          echo "## 🗑️ Removal Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,114 @@
+name: 4. Invoke APIs
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, staging, prod]
+      test_type:
+        description: 'Type of test'
+        required: true
+        default: 'smoke'
+        type: choice
+        options: [smoke, full, crud]
+
+env:
+  SERVICE_NAME: loans-service
+  OPENSHIFT_NAMESPACE: mortgage-app
+  TEST_CUSTOMER_ID: "11111111-1111-1111-1111-111111111111"
+  TEST_PROPERTY_ID: "aaaa1111-1111-1111-1111-111111111111"
+
+jobs:
+  invoke-apis:
+    name: Invoke APIs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install tools
+        run: sudo apt-get install -y jq
+
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4.14"
+
+      - name: Login to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Get Service URL
+        id: get-url
+        run: |
+          ROUTE_URL=$(oc get route ${{ env.SERVICE_NAME }} -n ${{ env.OPENSHIFT_NAMESPACE }} -o jsonpath='{.spec.host}')
+          echo "service_url=https://${ROUTE_URL}" >> $GITHUB_OUTPUT
+
+      - name: Smoke Tests
+        run: |
+          SERVICE_URL="${{ steps.get-url.outputs.service_url }}"
+          echo "🔥 Smoke Tests..."
+          
+          echo "GET /api/health"
+          curl -s "${SERVICE_URL}/api/health" | jq .
+          
+          echo "GET /api/loans"
+          curl -s "${SERVICE_URL}/api/loans" | jq '.data | length' | xargs -I {} echo "Found {} loans"
+
+      - name: CRUD Tests
+        if: github.event.inputs.test_type == 'full' || github.event.inputs.test_type == 'crud'
+        run: |
+          SERVICE_URL="${{ steps.get-url.outputs.service_url }}"
+          echo "🧪 CRUD Tests..."
+          
+          # CREATE
+          echo "=== CREATE Loan ==="
+          RESPONSE=$(curl -s -X POST "${SERVICE_URL}/api/loans" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "customerId": "${{ env.TEST_CUSTOMER_ID }}",
+              "propertyId": "${{ env.TEST_PROPERTY_ID }}",
+              "principalAmount": 400000,
+              "interestRate": 6.5,
+              "termMonths": 360,
+              "loanType": 1,
+              "downPayment": 80000
+            }')
+          echo "$RESPONSE" | jq .
+          LOAN_ID=$(echo "$RESPONSE" | jq -r '.data.id')
+          
+          if [ "$LOAN_ID" != "null" ] && [ -n "$LOAN_ID" ]; then
+            # READ
+            echo "=== READ Loan ==="
+            curl -s "${SERVICE_URL}/api/loans/${LOAN_ID}" | jq .
+            
+            # Get Balance
+            echo "=== GET Balance ==="
+            curl -s "${SERVICE_URL}/api/loans/${LOAN_ID}/balance" | jq .
+            
+            # Get by Customer
+            echo "=== GET by Customer ==="
+            curl -s "${SERVICE_URL}/api/loans/customer/${{ env.TEST_CUSTOMER_ID }}" | jq '.data | length' | xargs -I {} echo "Found {} loans for customer"
+            
+            # UPDATE
+            echo "=== UPDATE Loan ==="
+            curl -s -X PUT "${SERVICE_URL}/api/loans/${LOAN_ID}" \
+              -H "Content-Type: application/json" \
+              -d '{"notes": "Updated via API test"}' | jq .
+            
+            # DELETE
+            echo "=== DELETE Loan ==="
+            curl -s -X DELETE "${SERVICE_URL}/api/loans/${LOAN_ID}" | jq .
+          fi
+
+      - name: Summary
+        run: |
+          echo "## 🧪 API Tests Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: ${{ steps.get-url.outputs.service_url }}" >> $GITHUB_STEP_SUMMARY
